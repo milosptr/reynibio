@@ -1,0 +1,17 @@
+# === Secrets ===
+.env
+
+# === Runtime State ===
+config/
+
+# === OS / Editor ===
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# === Logs ===
+*.log
