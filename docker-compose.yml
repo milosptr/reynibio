@@ -1,5 +1,5 @@
 # === ReyniBio Media Server ===
-# 8 services, 2 networks, Intel QuickSync transcoding
+# 9 services, 2 networks, Intel QuickSync transcoding, Tailscale-secured
 # Start: docker compose up -d
 
 networks:
@@ -18,7 +18,7 @@ services:
     devices:
       - /dev/net/tun:/dev/net/tun
     ports:
-      - "8080:8080"   # qBittorrent WebUI (routed through VPN)
+      - "127.0.0.1:8080:8080"   # qBittorrent WebUI (routed through VPN)
     environment:
       - VPN_SERVICE_PROVIDER=${VPN_SERVICE_PROVIDER}
       - VPN_TYPE=${VPN_TYPE}
@@ -63,7 +63,7 @@ services:
     volumes:
       - ${CONFIG_DIR}/prowlarr:/config
     ports:
-      - "9696:9696"
+      - "127.0.0.1:9696:9696"
     networks:
       - reyni-media
     restart: unless-stopped
@@ -81,7 +81,7 @@ services:
       - ${CONFIG_DIR}/sonarr:/config
       - ${DATA_DIR}:/data
     ports:
-      - "8989:8989"
+      - "127.0.0.1:8989:8989"
     networks:
       - reyni-media
     restart: unless-stopped
@@ -99,7 +99,7 @@ services:
       - ${CONFIG_DIR}/radarr:/config
       - ${DATA_DIR}:/data
     ports:
-      - "7878:7878"
+      - "127.0.0.1:7878:7878"
     networks:
       - reyni-media
     restart: unless-stopped
@@ -117,7 +117,7 @@ services:
       - ${CONFIG_DIR}/bazarr:/config
       - ${DATA_DIR}/media:/data/media
     ports:
-      - "6767:6767"
+      - "127.0.0.1:6767:6767"
     networks:
       - reyni-media
     restart: unless-stopped
@@ -135,7 +135,7 @@ services:
       - ${CONFIG_DIR}/jellyfin:/config
       - ${DATA_DIR}/media:/data/media:ro
     ports:
-      - "8096:8096"
+      - "127.0.0.1:8096:8096"
     networks:
       - reyni-media
     restart: unless-stopped
@@ -149,7 +149,23 @@ services:
     volumes:
       - ${CONFIG_DIR}/jellyseerr:/app/config
     ports:
-      - "5055:5055"
+      - "127.0.0.1:5055:5055"
+    networks:
+      - reyni-media
+    restart: unless-stopped
+
+  # ── Dashboard ──────────────────────────────────────
+  homarr:
+    image: ghcr.io/homarr-labs/homarr:latest
+    container_name: reyni-homarr
+    environment:
+      - SECRET_ENCRYPTION_KEY=${HOMARR_SECRET_KEY}
+      - TZ=${TZ}
+    volumes:
+      - ${CONFIG_DIR}/homarr:/appdata
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports:
+      - "127.0.0.1:7575:7575"
     networks:
       - reyni-media
     restart: unless-stopped

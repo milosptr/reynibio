@@ -5,17 +5,25 @@ Home media server stack running on Debian 12 with Intel QuickSync hardware trans
 ## Quick Start
 
 ```bash
-# 1. Provision the machine (Docker, Intel GPU drivers, directories)
+# 1. Provision the machine (Docker, Intel GPU drivers, Tailscale, directories)
 sudo bash setup.sh
 
-# 2. Edit .env with your VPN credentials
+# 2. Connect to Tailscale (services are localhost-only)
+sudo tailscale up
+tailscale ip -4          # note your Tailscale IP
+
+# 3. Edit .env with your VPN credentials
 nano .env
 
-# 3. Start all services
+# 4. Start all services
 docker compose up -d
+
+# 5. Open the dashboard at http://<tailscale-ip>:7575
 ```
 
 ## Services
+
+All ports are bound to `127.0.0.1` — services are only reachable via Tailscale VPN or from the host itself.
 
 | Service | Port | Purpose |
 |---------|------|---------|
@@ -27,6 +35,7 @@ docker compose up -d
 | Bazarr | 6767 | Subtitle management |
 | Jellyfin | 8096 | Media server (QuickSync transcoding) |
 | Jellyseerr | 5055 | Media request UI |
+| Homarr | 7575 | Service dashboard |
 
 ## Wiring Pipeline
 
@@ -54,6 +63,33 @@ Bazarr (:6767) — auto-download subtitles for media
 | `reyni-media` | Service communication | All services (Gluetun bridges both) |
 
 The *arr apps reach qBittorrent at `reyni-gluetun:8080` through the `reyni-media` network.
+
+## Security
+
+Two layers keep services private:
+
+1. **Localhost binding** — every Docker port maps to `127.0.0.1`, so no service is reachable from the LAN or internet.
+2. **Tailscale VPN** — the host runs Tailscale, which creates an encrypted WireGuard mesh. Only devices on your Tailscale network can reach the server.
+
+### Accessing services from another device
+
+1. Install Tailscale on your client device (laptop, phone, etc.).
+2. Join the same Tailscale network.
+3. Get the server's Tailscale IP: `tailscale ip -4` (on the server).
+4. Open `http://<tailscale-ip>:<port>` in your browser.
+
+### Optional: UFW hardening
+
+If the server has a public IP, add a firewall as a third layer:
+
+```bash
+sudo ufw default deny incoming
+sudo ufw default allow outgoing
+sudo ufw allow in on tailscale0
+sudo ufw enable
+```
+
+This allows all traffic over the Tailscale interface and blocks everything else.
 
 ## Directory Structure
 
@@ -106,7 +142,13 @@ Configure services in this order:
 - Add Sonarr: URL `http://reyni-sonarr:8989`
 - Add Radarr: URL `http://reyni-radarr:7878`
 
-### 6. Bazarr (`:6767`)
+### 6. Homarr (`:7575`)
+
+- Open `http://<server-ip>:7575` and create an admin account
+- Docker containers are auto-discovered via the mounted socket
+- Add service widgets to your board for at-a-glance status
+
+### 7. Bazarr (`:6767`)
 
 - Settings → Sonarr: URL `http://reyni-sonarr:8989`, add API key
 - Settings → Radarr: URL `http://reyni-radarr:7878`, add API key

@@ -153,6 +153,7 @@ SERVICES=(
     bazarr
     jellyfin
     jellyseerr
+    homarr
 )
 
 for service in "${SERVICES[@]}"; do
@@ -193,6 +194,17 @@ if [[ -n "$RENDER_GID" && -f "$ENV_FILE" ]]; then
     fi
 fi
 
+# Auto-generate HOMARR_SECRET_KEY in .env if blank
+if [[ -f "$ENV_FILE" ]]; then
+    if grep -q "^HOMARR_SECRET_KEY=$" "$ENV_FILE"; then
+        HOMARR_KEY=$(openssl rand -hex 32)
+        sed -i "s/^HOMARR_SECRET_KEY=$/HOMARR_SECRET_KEY=${HOMARR_KEY}/" "$ENV_FILE"
+        echo -e "${GREEN}Auto-generated HOMARR_SECRET_KEY in .env${NC}"
+    elif grep -q "^HOMARR_SECRET_KEY=" "$ENV_FILE"; then
+        echo "HOMARR_SECRET_KEY already set in .env — skipping."
+    fi
+fi
+
 echo ""
 
 # =========================================
@@ -218,6 +230,31 @@ fi
 echo ""
 
 # =========================================
+# 8. Install Tailscale VPN
+# =========================================
+if command -v tailscale &> /dev/null; then
+    echo -e "${GREEN}Tailscale already installed:${NC} $(tailscale version | head -1)"
+else
+    echo "Installing Tailscale..."
+    curl -fsSL https://tailscale.com/install.sh | sh
+    echo -e "${GREEN}Tailscale installed:${NC} $(tailscale version | head -1)"
+fi
+
+# Check Tailscale auth status
+TAILSCALE_IP=""
+if tailscale status &> /dev/null; then
+    TAILSCALE_IP=$(tailscale ip -4 2>/dev/null || true)
+    if [[ -n "$TAILSCALE_IP" ]]; then
+        echo -e "${GREEN}Tailscale connected: ${TAILSCALE_IP}${NC}"
+    fi
+else
+    echo -e "${YELLOW}Tailscale installed but not authenticated.${NC}"
+    echo "Run 'sudo tailscale up' after setup to connect."
+fi
+
+echo ""
+
+# =========================================
 # Summary
 # =========================================
 echo "========================================="
@@ -225,6 +262,9 @@ echo -e "  ${GREEN}Setup complete!${NC}"
 echo "========================================="
 echo ""
 echo "Next steps:"
+echo "  0. Connect Tailscale (services are localhost-only):"
+echo "     sudo tailscale up"
+echo "     tailscale ip -4          # note your Tailscale IP"
 echo "  1. Edit .env with your VPN credentials"
 echo "  2. Start the stack:"
 echo "     cd ${SCRIPT_DIR} && docker compose up -d"
@@ -234,6 +274,11 @@ echo "  4. Enable QuickSync in Jellyfin:"
 echo "     Dashboard → Playback → Hardware acceleration: Intel QuickSync"
 echo "     Device: /dev/dri/renderD128"
 echo ""
+if [[ -n "$TAILSCALE_IP" ]]; then
+    echo -e "  Tailscale:       ${GREEN}Connected${NC} (${TAILSCALE_IP})"
+else
+    echo -e "  Tailscale:       ${YELLOW}Run 'sudo tailscale up' to connect${NC}"
+fi
 if [[ -n "$RENDER_GID" ]]; then
     echo -e "  Intel QuickSync: ${GREEN}Ready${NC} (render GID: ${RENDER_GID})"
 else
