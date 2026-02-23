@@ -1,6 +1,29 @@
 # === ReyniBio Media Server ===
-# 9 services, 2 networks, Intel QuickSync transcoding, Tailscale-secured
+# 14 services, 2 networks, Intel QuickSync transcoding, Tailscale-secured
 # Start: docker compose up -d
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-security: &default-security
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
+x-lsio-security: &lsio-security
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  cap_add:
+    - CHOWN
+    - SETUID
+    - SETGID
+    - FOWNER
 
 networks:
   reyni-vpn:
@@ -13,28 +36,44 @@ services:
   gluetun:
     image: qmcgaw/gluetun:v3
     container_name: reyni-gluetun
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     cap_add:
       - NET_ADMIN
+      - NET_RAW
     devices:
       - /dev/net/tun:/dev/net/tun
     ports:
       - "127.0.0.1:8080:8080"   # qBittorrent WebUI (routed through VPN)
+      - "127.0.0.1:8191:8191"   # Flaresolverr (routed through VPN)
     environment:
       - VPN_SERVICE_PROVIDER=${VPN_SERVICE_PROVIDER}
       - VPN_TYPE=${VPN_TYPE}
       - WIREGUARD_PRIVATE_KEY=${WIREGUARD_PRIVATE_KEY}
       - SERVER_COUNTRIES=${VPN_SERVER_COUNTRY}
+      - FIREWALL=on
+      - DOT=on
+      - DOT_PROVIDERS=cloudflare
+      - BLOCK_MALICIOUS=on
+      - UPDATER_PERIOD=24h
+      - VPN_PORT_FORWARDING=${VPN_PORT_FORWARDING}
+      - VPN_PORT_FORWARDING_PROVIDER=${VPN_PORT_FORWARDING_PROVIDER:-}
     volumes:
       - ${CONFIG_DIR}/gluetun:/gluetun
     networks:
       - reyni-vpn
       - reyni-media
     restart: unless-stopped
+    mem_limit: 512m
+    logging: *default-logging
 
   # ── Torrent Client (behind VPN) ─────────────────────
   qbittorrent:
     image: qbittorrentofficial/qbittorrent-nox:5.1.4
     container_name: reyni-qbittorrent
+    <<: *default-security
     network_mode: "service:gluetun"
     depends_on:
       gluetun:
@@ -50,11 +89,30 @@ services:
       - ${CONFIG_DIR}/qbittorrent:/config
       - ${DATA_DIR}/torrents:/data/torrents
     restart: unless-stopped
+    mem_limit: 2g
+    logging: *default-logging
+
+  # ── Cloudflare Bypass (behind VPN) ─────────────────
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:v3.3.21
+    container_name: reyni-flaresolverr
+    <<: *default-security
+    network_mode: "service:gluetun"
+    depends_on:
+      gluetun:
+        condition: service_healthy
+    environment:
+      - TZ=${TZ}
+      - LOG_LEVEL=info
+    restart: unless-stopped
+    mem_limit: 512m
+    logging: *default-logging
 
   # ── Indexer Manager ─────────────────────────────────
   prowlarr:
     image: lscr.io/linuxserver/prowlarr:1.32
     container_name: reyni-prowlarr
+    <<: *lsio-security
     environment:
       - PUID=${PUID}
       - PGID=${PGID}
@@ -66,12 +124,20 @@ services:
       - "127.0.0.1:9696:9696"
     networks:
       - reyni-media
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9696/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     restart: unless-stopped
+    mem_limit: 512m
+    logging: *default-logging
 
   # ── TV Shows ────────────────────────────────────────
   sonarr:
     image: lscr.io/linuxserver/sonarr:4.0.14
     container_name: reyni-sonarr
+    <<: *lsio-security
     environment:
       - PUID=${PUID}
       - PGID=${PGID}
@@ -84,12 +150,20 @@ services:
       - "127.0.0.1:8989:8989"
     networks:
       - reyni-media
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8989/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     restart: unless-stopped
+    mem_limit: 1g
+    logging: *default-logging
 
   # ── Movies ──────────────────────────────────────────
   radarr:
     image: lscr.io/linuxserver/radarr:5.22
     container_name: reyni-radarr
+    <<: *lsio-security
     environment:
       - PUID=${PUID}
       - PGID=${PGID}
@@ -102,12 +176,20 @@ services:
       - "127.0.0.1:7878:7878"
     networks:
       - reyni-media
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7878/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     restart: unless-stopped
+    mem_limit: 1g
+    logging: *default-logging
 
   # ── Subtitles ───────────────────────────────────────
   bazarr:
     image: lscr.io/linuxserver/bazarr:1.5
     container_name: reyni-bazarr
+    <<: *lsio-security
     environment:
       - PUID=${PUID}
       - PGID=${PGID}
@@ -120,17 +202,25 @@ services:
       - "127.0.0.1:6767:6767"
     networks:
       - reyni-media
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6767"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     restart: unless-stopped
+    mem_limit: 512m
+    logging: *default-logging
 
   # ── Media Server (Intel QuickSync) ──────────────────
   jellyfin:
     image: jellyfin/jellyfin:10.11.6
     container_name: reyni-jellyfin
+    <<: *default-security
     user: "${PUID}:${PGID}"
     group_add:
       - "${RENDER_GID}"
     devices:
-      - /dev/dri:/dev/dri
+      - /dev/dri/renderD128:/dev/dri/renderD128
     volumes:
       - ${CONFIG_DIR}/jellyfin:/config
       - ${DATA_DIR}/media:/data/media:ro
@@ -138,12 +228,20 @@ services:
       - "127.0.0.1:8096:8096"
     networks:
       - reyni-media
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8096/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     restart: unless-stopped
+    mem_limit: 4g
+    logging: *default-logging
 
   # ── Request Management ──────────────────────────────
   jellyseerr:
     image: fallenbagel/jellyseerr:2.3
     container_name: reyni-jellyseerr
+    <<: *default-security
     environment:
       - TZ=${TZ}
     volumes:
@@ -152,20 +250,107 @@ services:
       - "127.0.0.1:5055:5055"
     networks:
       - reyni-media
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:5055 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     restart: unless-stopped
+    mem_limit: 512m
+    logging: *default-logging
+
+  # ── Docker Socket Proxy (limits API surface for Homarr) ──
+  docker-socket-proxy:
+    image: tecnativa/docker-socket-proxy:0.3
+    container_name: reyni-docker-proxy
+    <<: *default-security
+    environment:
+      - CONTAINERS=1
+      - IMAGES=1
+      - INFO=1
+      - NETWORKS=0
+      - VOLUMES=0
+      - EXEC=0
+      - POST=0
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - reyni-media
+    restart: unless-stopped
+    mem_limit: 128m
+    logging: *default-logging
 
   # ── Dashboard ──────────────────────────────────────
   homarr:
-    image: ghcr.io/homarr-labs/homarr:latest
+    image: ghcr.io/homarr-labs/homarr:v1.53.2
     container_name: reyni-homarr
+    <<: *default-security
+    depends_on:
+      - docker-socket-proxy
     environment:
       - SECRET_ENCRYPTION_KEY=${HOMARR_SECRET_KEY}
+      - DOCKER_HOST=tcp://reyni-docker-proxy:2375
       - TZ=${TZ}
     volumes:
       - ${CONFIG_DIR}/homarr:/appdata
-      - /var/run/docker.sock:/var/run/docker.sock:ro
     ports:
       - "127.0.0.1:7575:7575"
     networks:
       - reyni-media
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:7575 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
     restart: unless-stopped
+    mem_limit: 512m
+    logging: *default-logging
+
+  # ── Monitoring ─────────────────────────────────────
+  uptime-kuma:
+    image: louislam/uptime-kuma:2.1.3
+    container_name: reyni-uptime-kuma
+    <<: *default-security
+    environment:
+      - TZ=${TZ}
+    volumes:
+      - ${CONFIG_DIR}/uptime-kuma:/app/data
+    ports:
+      - "127.0.0.1:3001:3001"
+    networks:
+      - reyni-media
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:3001 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+    mem_limit: 512m
+    logging: *default-logging
+
+  # ── Reverse Proxy (HTTPS) ────────────────────────
+  caddy:
+    image: caddy:2.9-alpine
+    container_name: reyni-caddy
+    <<: *default-security
+    ports:
+      - "127.0.0.1:80:80"
+      - "127.0.0.1:443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks:
+      - reyni-media
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO /dev/null http://localhost:2019/config/ 2>/dev/null || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+    mem_limit: 256m
+    logging: *default-logging
+
+volumes:
+  caddy_data:
+  caddy_config:

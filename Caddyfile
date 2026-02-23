@@ -1,0 +1,69 @@
+# === ReyniBio — Caddy Reverse Proxy ===
+# HTTPS with internal CA for *.reyni.lan domains.
+# Clients must trust the Caddy root CA (see: make certs).
+
+(security_headers) {
+	header {
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "SAMEORIGIN"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		-Server
+	}
+}
+
+(defaults) {
+	tls internal
+	import security_headers
+	encode zstd gzip
+}
+
+# Catch-all: reject requests without a matching hostname
+:80 {
+	respond "Not Found" 404
+}
+
+watch.reyni.lan {
+	import defaults
+	reverse_proxy reyni-jellyfin:8096
+}
+
+tv.reyni.lan {
+	import defaults
+	reverse_proxy reyni-sonarr:8989
+}
+
+movies.reyni.lan {
+	import defaults
+	reverse_proxy reyni-radarr:7878
+}
+
+indexers.reyni.lan {
+	import defaults
+	reverse_proxy reyni-prowlarr:9696
+}
+
+subtitles.reyni.lan {
+	import defaults
+	reverse_proxy reyni-bazarr:6767
+}
+
+request.reyni.lan {
+	import defaults
+	reverse_proxy reyni-jellyseerr:5055
+}
+
+home.reyni.lan {
+	import defaults
+	reverse_proxy reyni-homarr:7575
+}
+
+status.reyni.lan {
+	import defaults
+	reverse_proxy reyni-uptime-kuma:3001
+}
+
+downloads.reyni.lan {
+	import defaults
+	reverse_proxy reyni-gluetun:8080
+}

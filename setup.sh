@@ -27,10 +27,81 @@ fi
 
 # --- Detect the real user (not root) ---
 ACTUAL_USER="${SUDO_USER:-$USER}"
-echo "Running as root. Real user: ${ACTUAL_USER}"
+if ! id "$ACTUAL_USER" &>/dev/null; then
+    echo -e "${RED}Error: User '${ACTUAL_USER}' does not exist.${NC}"
+    exit 1
+fi
+ACTUAL_UID=$(id -u "$ACTUAL_USER")
+ACTUAL_GID=$(id -g "$ACTUAL_USER")
+echo "Running as root. Real user: ${ACTUAL_USER} (${ACTUAL_UID}:${ACTUAL_GID})"
 echo ""
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# =========================================
+# 0. Pre-flight Checks
+# =========================================
+echo "Running pre-flight checks..."
+echo ""
+
+# OS detection
+CODENAME="bookworm"
+if [[ -f /etc/os-release ]]; then
+    . /etc/os-release
+    CODENAME="${VERSION_CODENAME:-bookworm}"
+    if [[ "${ID:-}" == "debian" && "${VERSION_ID:-}" == "12" ]]; then
+        echo -e "${GREEN}OS: ${PRETTY_NAME} — supported.${NC}"
+    else
+        echo -e "${YELLOW}Warning: Expected Debian 12 (Bookworm), detected ${PRETTY_NAME:-unknown}.${NC}"
+        echo "This script may still work but has only been tested on Debian 12."
+    fi
+else
+    echo -e "${YELLOW}Warning: /etc/os-release not found — cannot detect OS.${NC}"
+fi
+
+# RAM check
+TOTAL_MEM_GB=$(awk '/MemTotal/ {printf "%.0f", $2/1024/1024}' /proc/meminfo 2>/dev/null || echo "0")
+if [[ "$TOTAL_MEM_GB" -gt 0 ]]; then
+    if [[ "$TOTAL_MEM_GB" -lt 8 ]]; then
+        echo -e "${YELLOW}Warning: Only ${TOTAL_MEM_GB}GB RAM detected (recommend at least 8GB).${NC}"
+    else
+        echo -e "${GREEN}RAM: ${TOTAL_MEM_GB}GB detected.${NC}"
+    fi
+fi
+
+# Disk space check on /data
+DATA_MOUNT="/data"
+if mountpoint -q "$DATA_MOUNT" 2>/dev/null || [[ -d "$DATA_MOUNT" ]]; then
+    AVAIL_GB=$(df -BG "$DATA_MOUNT" 2>/dev/null | awk 'NR==2 {gsub(/G/,"",$4); print $4}')
+    if [[ -n "$AVAIL_GB" && "$AVAIL_GB" -lt 50 ]]; then
+        echo -e "${YELLOW}Warning: Only ${AVAIL_GB}GB free on ${DATA_MOUNT} (recommend at least 50GB).${NC}"
+    elif [[ -n "$AVAIL_GB" ]]; then
+        echo -e "${GREEN}Disk: ${AVAIL_GB}GB free on ${DATA_MOUNT}.${NC}"
+    fi
+else
+    echo -e "${YELLOW}Warning: ${DATA_MOUNT} does not exist yet (will be created in step 4).${NC}"
+fi
+
+# Internet connectivity
+if curl -sf --max-time 5 https://get.docker.com > /dev/null 2>&1; then
+    echo -e "${GREEN}Internet: reachable.${NC}"
+else
+    echo -e "${YELLOW}Warning: Cannot reach https://get.docker.com — Docker install may fail.${NC}"
+fi
+
+# Non-free repo check (needed for Intel GPU drivers)
+if [[ -f /etc/apt/sources.list ]] && grep -q "non-free" /etc/apt/sources.list 2>/dev/null; then
+    echo -e "${GREEN}APT: non-free repository enabled.${NC}"
+elif find /etc/apt/sources.list.d/ -name '*.list' -exec grep -l 'non-free' {} + 2>/dev/null | grep -q .; then
+    echo -e "${GREEN}APT: non-free repository enabled (sources.list.d).${NC}"
+elif find /etc/apt/sources.list.d/ -name '*.sources' -exec grep -l 'non-free' {} + 2>/dev/null | grep -q .; then
+    echo -e "${GREEN}APT: non-free repository enabled (deb822 format).${NC}"
+else
+    echo -e "${YELLOW}Warning: 'non-free' not found in apt sources — Intel GPU driver install may fail.${NC}"
+    echo "Add 'non-free non-free-firmware' to your Debian apt sources if needed."
+fi
+
+echo ""
 
 # =========================================
 # 1. Install Docker CE + Compose Plugin
@@ -38,7 +109,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 if command -v docker &> /dev/null; then
     echo -e "${GREEN}Docker already installed:${NC} $(docker --version)"
 else
-    echo "Installing Docker CE for Debian 12 (Bookworm)..."
+    echo "Installing Docker CE..."
 
     apt-get update -qq
     apt-get install -y ca-certificates curl
@@ -49,7 +120,7 @@ else
 
     echo \
       "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/debian \
-      bookworm stable" > /etc/apt/sources.list.d/docker.list
+      ${CODENAME} stable" > /etc/apt/sources.list.d/docker.list
 
     apt-get update -qq
     apt-get install -y \
@@ -86,9 +157,18 @@ echo ""
 # =========================================
 # 3. Install Intel GPU Drivers (QuickSync)
 # =========================================
-echo "Installing Intel VA-API drivers for QuickSync..."
+if dpkg -s intel-media-va-driver-non-free &>/dev/null; then
+    echo -e "${GREEN}Intel VA-API drivers already installed.${NC}"
+else
+    echo "Installing Intel VA-API drivers for QuickSync..."
+    apt-get install -y intel-media-va-driver-non-free vainfo
+fi
 
-apt-get install -y intel-media-va-driver-non-free vainfo
+# Install sqlite3 for safe backups
+if ! dpkg -s sqlite3 &>/dev/null; then
+    echo "Installing sqlite3 (for safe database backups)..."
+    apt-get install -y sqlite3
+fi
 
 # Add user to render and video groups for GPU access
 if [[ "$ACTUAL_USER" != "root" ]]; then
@@ -128,7 +208,7 @@ mkdir -p /data/torrents/complete
 mkdir -p /data/media/tv
 mkdir -p /data/media/movies
 
-chown -R 1000:1000 /data
+chown -R "${ACTUAL_UID}:${ACTUAL_GID}" /data
 
 echo -e "${GREEN}/data directory structure created:${NC}"
 echo "  /data/torrents/incomplete"
@@ -147,6 +227,7 @@ echo "Creating config directories at ${CONFIG_DIR}/..."
 SERVICES=(
     gluetun
     qbittorrent
+    flaresolverr
     prowlarr
     sonarr
     radarr
@@ -154,13 +235,14 @@ SERVICES=(
     jellyfin
     jellyseerr
     homarr
+    uptime-kuma
 )
 
 for service in "${SERVICES[@]}"; do
     mkdir -p "${CONFIG_DIR}/${service}"
 done
 
-chown -R 1000:1000 "${CONFIG_DIR}"
+chown -R "${ACTUAL_UID}:${ACTUAL_GID}" "${CONFIG_DIR}"
 
 echo -e "${GREEN}Config directories created for ${#SERVICES[@]} services.${NC}"
 echo ""
@@ -177,10 +259,23 @@ else
     if [[ -f "$ENV_EXAMPLE" ]]; then
         cp "$ENV_EXAMPLE" "$ENV_FILE"
         chown "${ACTUAL_USER}:${ACTUAL_USER}" "$ENV_FILE" 2>/dev/null || true
-        echo -e "${GREEN}.env created from .env.example.${NC}"
+        chmod 600 "$ENV_FILE"
+        echo -e "${GREEN}.env created from .env.example (permissions: 600).${NC}"
     else
         echo -e "${RED}Warning: .env.example not found at ${ENV_EXAMPLE}${NC}"
         echo "You will need to create .env manually."
+    fi
+fi
+
+# Auto-fill PUID/PGID in .env from actual user
+if [[ -f "$ENV_FILE" ]]; then
+    if grep -q "^PUID=1000$" "$ENV_FILE" && [[ "$ACTUAL_UID" != "1000" ]]; then
+        sed -i "s/^PUID=1000$/PUID=${ACTUAL_UID}/" "$ENV_FILE"
+        echo -e "${GREEN}Auto-filled PUID=${ACTUAL_UID} in .env${NC}"
+    fi
+    if grep -q "^PGID=1000$" "$ENV_FILE" && [[ "$ACTUAL_GID" != "1000" ]]; then
+        sed -i "s/^PGID=1000$/PGID=${ACTUAL_GID}/" "$ENV_FILE"
+        echo -e "${GREEN}Auto-filled PGID=${ACTUAL_GID} in .env${NC}"
     fi
 fi
 
@@ -230,13 +325,42 @@ fi
 echo ""
 
 # =========================================
-# 8. Install Tailscale VPN
+# 8. Verify TUN Device (VPN)
+# =========================================
+echo "Checking VPN prerequisites..."
+
+if [[ -e /dev/net/tun ]]; then
+    echo -e "${GREEN}/dev/net/tun exists.${NC}"
+else
+    echo -e "${YELLOW}Warning: /dev/net/tun not found. Loading tun module...${NC}"
+    modprobe tun 2>/dev/null || true
+    if [[ -e /dev/net/tun ]]; then
+        echo -e "${GREEN}/dev/net/tun available after modprobe.${NC}"
+        # Make it persistent across reboots
+        if ! grep -q "^tun$" /etc/modules-load.d/tun.conf 2>/dev/null; then
+            echo "tun" > /etc/modules-load.d/tun.conf
+            echo "Added tun to /etc/modules-load.d/tun.conf for persistence."
+        fi
+    else
+        echo -e "${RED}Error: Cannot create /dev/net/tun. Gluetun VPN will not work.${NC}"
+    fi
+fi
+
+echo ""
+
+# =========================================
+# 9. Install Tailscale VPN
 # =========================================
 if command -v tailscale &> /dev/null; then
     echo -e "${GREEN}Tailscale already installed:${NC} $(tailscale version | head -1)"
 else
-    echo "Installing Tailscale..."
-    curl -fsSL https://tailscale.com/install.sh | sh
+    echo "Installing Tailscale via APT repository..."
+    curl -fsSL "https://pkgs.tailscale.com/stable/debian/${CODENAME}.noarmor.gpg" \
+        -o /usr/share/keyrings/tailscale-archive-keyring.gpg
+    curl -fsSL "https://pkgs.tailscale.com/stable/debian/${CODENAME}.tailscale-keyring.list" \
+        -o /etc/apt/sources.list.d/tailscale.list
+    apt-get update -qq
+    apt-get install -y tailscale
     echo -e "${GREEN}Tailscale installed:${NC} $(tailscale version | head -1)"
 fi
 
@@ -270,7 +394,10 @@ echo "  2. Start the stack:"
 echo "     cd ${SCRIPT_DIR} && docker compose up -d"
 echo "  3. Configure services in order:"
 echo "     qBittorrent → Prowlarr → Sonarr/Radarr → Jellyfin → Jellyseerr → Bazarr"
-echo "  4. Enable QuickSync in Jellyfin:"
+echo "  4. Add Flaresolverr to Prowlarr:"
+echo "     Settings → Indexers → Add → Flaresolverr"
+echo "     Host: http://reyni-gluetun:8191"
+echo "  5. Enable QuickSync in Jellyfin:"
 echo "     Dashboard → Playback → Hardware acceleration: Intel QuickSync"
 echo "     Device: /dev/dri/renderD128"
 echo ""
